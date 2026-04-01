@@ -23,35 +23,55 @@ st.title("🏛️ FusionX Founder Control Center")
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["🚀 Launch", "📂 CRM", "🔥 Follow-ups", "🆕 New Leads", "📊 Master View"])
 
-# --- TAB 1: DATA UPLOAD ---
+# --- TAB 1: DATA UPLOAD & MANUAL ENTRY ---
 with tab1:
-    file = st.file_uploader("Upload Lead List (Excel)", type=["xlsx"])
-    if file and st.button("Generate 8-Part Sequences"):
-        df = pd.read_excel(file)
-        
-        # Robust header cleaning to prevent KeyErrors
-        df.columns = df.columns.str.strip().str.lower()
-        
-        # Mapping based on your spreadsheet structure
-        name_col = 'company employee name'
-        comp_col = 'company name'
-        pos_col = 'position'
-        link_col = 'linkedin'
+    col1, col2 = st.columns([1, 1], gap="large")
 
-        df = df.drop_duplicates(subset=[name_col, comp_col])
-        
-        for _, row in df.iterrows():
-            name = row[name_col]
-            company = row[comp_col]
-            industry = row[pos_col] 
-            linkedin = row[link_col]
+    with col1:
+        st.subheader("📁 Bulk Upload")
+        file = st.file_uploader("Upload Lead List (Excel)", type=["xlsx"])
+        if file and st.button("Generate Sequences from Excel", use_container_width=True):
+            df = pd.read_excel(file)
+            df.columns = df.columns.str.strip().str.lower()
             
-            if not is_duplicate(name, company):
-                ai_input = {'Name': name, 'Company': company, 'Industry': industry}
-                seq = generate_vamshi_sequence(ai_input)
-                save_full_sequence(name, company, industry, linkedin, seq)
-        st.success(f"Campaign Ready for {len(df)} leads!")
+            # Mapping based on your spreadsheet structure
+            name_col, comp_col, pos_col, link_col = 'company employee name', 'company name', 'position', 'linkedin'
+            df = df.drop_duplicates(subset=[name_col, comp_col])
+            
+            progress_bar = st.progress(0)
+            for i, row in df.iterrows():
+                name, company, industry, linkedin = row[name_col], row[comp_col], row[pos_col], row[link_col]
+                if not is_duplicate(name, company):
+                    ai_input = {'Name': name, 'Company': company, 'Industry': industry}
+                    seq = generate_vamshi_sequence(ai_input)
+                    save_full_sequence(name, company, industry, linkedin, seq)
+                progress_bar.progress((i + 1) / len(df))
+            st.success(f"✅ Campaign Ready for {len(df)} leads!")
 
+    with col2:
+        st.subheader("👤 Manual Entry")
+        with st.form("manual_entry_form", clear_on_submit=True):
+            m_name = st.text_input("Full Name")
+            m_comp = st.text_input("Company Name")
+            m_pos = st.text_input("Position / Industry")
+            m_link = st.text_input("LinkedIn Profile URL")
+            
+            submit_manual = st.form_submit_button("Add Lead & Generate Sequence", use_container_width=True)
+            
+            if submit_manual:
+                if m_name and m_comp and m_pos and m_link:
+                    if not is_duplicate(m_name, m_comp):
+                        # Prepare input for your sequence generator
+                        ai_input = {'Name': m_name, 'Company': m_comp, 'Industry': m_pos}
+                        seq = generate_vamshi_sequence(ai_input)
+                        
+                        # Save to Database
+                        save_full_sequence(m_name, m_comp, m_pos, m_link, seq)
+                        st.success(f"🎯 Added {m_name} to CRM!")
+                    else:
+                        st.warning("This person already exists in the database.")
+                else:
+                    st.error("Please fill in all fields.")
 # --- TAB 2: CRM SEARCH ---
 with tab2:
     conn = sqlite3.connect("data/fusionx_crm.db")
@@ -181,17 +201,42 @@ with tab5:
     st.subheader("📊 Master Prospect Database")
     conn = sqlite3.connect("data/fusionx_crm.db")
     
-    # FIXED: Removed 'created_at' to prevent DatabaseError
-    master_df = pd.read_sql_query("SELECT name, company, industry, linkedin FROM prospects", conn)
+    # This query joins the tables to calculate status and counts
+    query = """
+    SELECT 
+        p.name AS "Name", 
+        p.company AS "Company", 
+        p.industry AS "Position",
+        p.linkedin AS "LinkedIn",
+        MAX(CASE WHEN m.stage = 'START' THEN 
+            (CASE WHEN m.status = 1 THEN '✅ Sent' ELSE '⏳ Pending' END) 
+        END) AS "Start Status",
+        SUM(CASE WHEN m.stage != 'START' AND m.status = 1 THEN 1 ELSE 0 END) AS "Follow-ups Sent"
+    FROM prospects p
+    LEFT JOIN messages m ON p.id = m.prospect_id
+    GROUP BY p.id
+    ORDER BY p.id DESC
+    """
+    
+    master_df = pd.read_sql_query(query, conn)
     
     if not master_df.empty:
-        st.dataframe(master_df, use_container_width=True, hide_index=True)
+        # Display the interactive table
+        st.dataframe(
+            master_df, 
+            use_container_width=True, 
+            hide_index=True,
+            column_config={
+                "LinkedIn": st.column_config.LinkColumn("LinkedIn URL")
+            }
+        )
+        
         st.download_button(
-            label="📥 Download CSV",
+            label="📥 Download Full Report (CSV)",
             data=master_df.to_csv(index=False),
-            file_name="fusionx_master_list.csv",
+            file_name=f"fusionx_report_{datetime.now().strftime('%Y%m%d')}.csv",
             mime="text/csv"
         )
     else:
-        st.info("The database is currently empty.")
+        st.info("The database is currently empty. Upload leads in the 'Launch' tab to get started.")
     conn.close()
