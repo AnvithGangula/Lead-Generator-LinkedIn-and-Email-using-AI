@@ -1,6 +1,7 @@
 import sqlite3
-from datetime import datetime
 import os
+from datetime import datetime, timedelta
+
 
 # Create data directory if missing
 if not os.path.exists("data"):
@@ -10,16 +11,18 @@ DB_NAME = "data/fusionx_unified.db"
 
 
 def get_connection():
-    conn = sqlite3.connect(DB_NAME)
+    import sqlite3
+
+    conn = sqlite3.connect("data/fusionx_unified.db")
+    # THIS IS THE KEY: It labels the data so you can use ['name']
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def init_db():
     conn = get_connection()
-    conn.execute("PRAGMA foreign_keys = ON")
 
-    # Prospects Table with all required columns
+    # Updated Prospects Table
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS prospects (
@@ -29,12 +32,13 @@ def init_db():
             industry TEXT,
             linkedin TEXT,
             email TEXT,
-            created_at TEXT
+            created_at TEXT,
+            UNIQUE(name, company) -- Final wall against duplicate people
         )
     """
     )
 
-    # Unified Messages Table for LinkedIn and Email
+    # Updated Messages Table
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS messages (
@@ -47,7 +51,8 @@ def init_db():
             status TEXT DEFAULT '0', 
             sent_at TEXT,
             next_followup TEXT,
-            FOREIGN KEY(prospect_id) REFERENCES prospects(id)
+            FOREIGN KEY(prospect_id) REFERENCES prospects(id),
+            UNIQUE(prospect_id, channel, stage) -- Final wall against duplicate emails
         )
     """
     )
@@ -67,54 +72,106 @@ def is_duplicate(name, company):
 def save_prospect_dual(
     name, company, industry, linkedin, email, li_seq=None, em_seq=None
 ):
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute(
-        "INSERT INTO prospects (name, company, industry, linkedin, email, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-        (name, company, industry, linkedin, email, datetime.now().strftime("%Y-%m-%d")),
+    # FIXED: Strip markdown characters at save time
+    name = name.strip().replace("*", "").replace("_", "").strip() if name else name
+    company = (
+        company.strip().replace("*", "").replace("_", "").strip()
+        if company
+        else company
     )
 
-    # FIX: Changed p_id = cursor.lastrow_id to lastrowid
-    p_id = cursor.lastrowid
+    conn = get_connection()
+    cursor = conn.cursor()
+    # ... rest of function unchanged
 
-    if li_seq:
-        for stage, text in li_seq.items():
-            cursor.execute(
-                "INSERT INTO messages (prospect_id, channel, stage, content, status) VALUES (?, ?, ?, ?, ?)",
-                (p_id, "linkedin", stage, text, "0"),
-            )
+    try:
+        # Use OR IGNORE to skip duplicates without throwing an error
+        cursor.execute(
+            "INSERT OR IGNORE INTO prospects (name, company, industry, linkedin, email, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                name,
+                company,
+                industry,
+                linkedin,
+                email,
+                datetime.now().strftime("%Y-%m-%d"),
+            ),
+        )
 
-    if em_seq:
-        for i, step in enumerate(em_seq):
-            cursor.execute(
-                "INSERT INTO messages (prospect_id, channel, stage, subject, content, status) VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    p_id,
-                    "email",
-                    step.get("label", f"Step {i+1}"),
-                    step.get("sub", ""),
-                    step.get("body", ""),
-                    "0",
-                ),
-            )
+        # Get the ID (lastrowid will be 0 if the row was ignored)
+        p_id = cursor.lastrowid
 
-    conn.commit()
-    conn.close()
+        # If p_id is 0, it means it was a duplicate and ignored.
+        # We fetch the existing ID to ensure we don't duplicate messages either.
+        if p_id == 0:
+            existing = cursor.execute(
+                "SELECT id FROM prospects WHERE name = ? AND company = ?",
+                (name, company),
+            ).fetchone()
+            p_id = existing[0] if existing else None
+
+        # Proceed with messages only if we have a valid p_id
+        if p_id:
+            # --- SAVE EMAIL MESSAGES ---
+            if em_seq:
+                for i, step in enumerate(em_seq):
+                    db_stage = "Initial" if i == 0 else f"Follow-up {i}"
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO messages (prospect_id, channel, stage, subject, content, status) VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            p_id,
+                            "email",
+                            db_stage,
+                            step.get("sub", ""),
+                            step.get("body", ""),
+                            "0",
+                        ),
+                    )
+
+            # --- SAVE LINKEDIN MESSAGES ---
+            if li_seq:
+                for stage, content in li_seq.items():
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO messages (prospect_id, channel, stage, content, status) VALUES (?, ?, ?, ?, ?)",
+                        (p_id, "linkedin", stage, content, "0"),
+                    )
+
+        conn.commit()
+    except sqlite3.Error as e:
+        # This handles other database errors like 'database is locked' gracefully
+        print(f"Database error: {e}")
+    finally:
+        conn.close()
 
 
 def update_message_status(msg_id, status, next_date=None):
     conn = get_connection()
-    if next_date:
-        conn.execute(
-            "UPDATE messages SET status = ?, sent_at = ?, next_followup = ? WHERE id = ?",
-            (status, datetime.now().strftime("%Y-%m-%d"), next_date, msg_id),
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    auto_next = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
+
+    # Update the sent message
+    conn.execute(
+        "UPDATE messages SET status = ?, sent_at = ? WHERE id = ?",
+        (status, now, msg_id),
+    )
+
+    # FIXED: Write next_followup onto the NEXT unsent email for this prospect
+    # so the cooldown query can read it directly from that row
+    conn.execute(
+        """
+        UPDATE messages SET next_followup = ?
+        WHERE id = (
+            SELECT m2.id FROM messages m2
+            WHERE m2.prospect_id = (SELECT prospect_id FROM messages WHERE id = ?)
+            AND m2.channel = 'email'
+            AND m2.status = '0'
+            ORDER BY m2.id ASC
+            LIMIT 1
         )
-    else:
-        conn.execute(
-            "UPDATE messages SET status = ?, sent_at = ? WHERE id = ?",
-            (status, datetime.now().strftime("%Y-%m-%d"), msg_id),
-        )
+        """,
+        (auto_next, msg_id),
+    )
+
     conn.commit()
     conn.close()
 
