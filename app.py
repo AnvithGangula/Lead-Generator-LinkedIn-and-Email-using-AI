@@ -690,6 +690,46 @@ elif mode == "📧Email Automation":
                                         st.rerun()
 
     with tab_track:
+        # --- WAITING / COOLDOWN ---
+        st.markdown("### ⏳ Scheduled (Waiting Period — 7 days)")
+        if waiting_df.empty:
+            st.info("No emails in cooldown.")
+        else:
+            for _, w in waiting_df.iterrows():
+                due_on = pd.to_datetime(w["next_followup"])
+                days_left = (due_on - today).days
+                hours_left = int(((due_on - today).total_seconds() % 86400) / 3600)
+                with st.container(border=True):
+                    col_a, col_b, col_c = st.columns([3, 2, 1])
+                    with col_a:
+                        name_safe = str(w["name"]).replace("*", "")
+                        company_safe = str(w["company"]).replace("*", "")
+                        st.markdown(f"**{name_safe}** @ {company_safe}")
+                        st.caption(f"Next: **{w['stage']}** — {w['subject']}")
+                    with col_b:
+                        if days_left > 0:
+                            st.info(
+                                f"🔒 Unlocks in **{days_left}d {hours_left}h** ({due_on.strftime('%b %d')})"
+                            )
+                        else:
+                            st.info(f"🔒 Unlocks in **{hours_left} hours** today")
+                    with col_c:
+                        if st.button(
+                            "⚡ Send Now",
+                            key=f"track_override_{w['id']}",
+                            use_container_width=True,
+                        ):
+                            if send_email_smtp(
+                                w["email"],
+                                w["subject"],
+                                w["content"],
+                                user_mail,
+                                app_pass,
+                            ):
+                                update_message_status(w["id"], "sent")
+                                st.success(f"Sent early to {w['name']}!")
+                                st.rerun()
+
         st.subheader("📅 Sent Outreach History")
         df_track = pd.read_sql_query(
             """
