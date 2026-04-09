@@ -94,7 +94,7 @@ def save_prospect_dual(
                 industry,
                 linkedin,
                 email,
-                datetime.now().strftime("%Y-%m-%d"),
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             ),
         )
 
@@ -147,7 +147,31 @@ def save_prospect_dual(
 def update_message_status(msg_id, status, next_date=None):
     conn = get_connection()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    auto_next = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
+
+    # Get the message channel to apply correct cooldown
+    msg_info = conn.execute(
+        "SELECT channel, prospect_id FROM messages WHERE id = ?", (msg_id,)
+    ).fetchone()
+
+    if not msg_info:
+        conn.close()
+        return False
+
+    channel = msg_info["channel"]
+    prospect_id = msg_info["prospect_id"]
+
+    # Get cooldown settings
+    li_cooldown, email_cooldown = get_cooldown_settings()
+
+    # Calculate next followup date based on channel
+    if channel == "linkedin":
+        next_followup = (datetime.now() + timedelta(days=li_cooldown)).strftime(
+            "%Y-%m-%d"
+        )
+    else:  # email
+        next_followup = (datetime.now() + timedelta(days=email_cooldown)).strftime(
+            "%Y-%m-%d"
+        )
 
     # Update the sent message
     conn.execute(
@@ -155,21 +179,20 @@ def update_message_status(msg_id, status, next_date=None):
         (status, now, msg_id),
     )
 
-    # FIXED: Write next_followup onto the NEXT unsent email for this prospect
-    # so the cooldown query can read it directly from that row
+    # Update next_followup for the next unsent message
     conn.execute(
         """
         UPDATE messages SET next_followup = ?
         WHERE id = (
             SELECT m2.id FROM messages m2
-            WHERE m2.prospect_id = (SELECT prospect_id FROM messages WHERE id = ?)
-            AND m2.channel = 'email'
+            WHERE m2.prospect_id = ?
+            AND m2.channel = ?
             AND m2.status = '0'
             ORDER BY m2.id ASC
             LIMIT 1
         )
         """,
-        (auto_next, msg_id),
+        (next_followup, prospect_id, channel),
     )
 
     conn.commit()
@@ -184,7 +207,13 @@ def save_linkedin_only(name, company, industry, linkedin, li_seq):
         # 1. Insert or get Prospect
         cursor.execute(
             "INSERT OR IGNORE INTO prospects (name, company, industry, linkedin, created_at) VALUES (?, ?, ?, ?, ?)",
-            (name, company, industry, linkedin, datetime.now().strftime("%Y-%m-%d")),
+            (
+                name,
+                company,
+                industry,
+                linkedin,
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            ),
         )
 
         # Get ID
@@ -215,8 +244,14 @@ def update_linkedin_status(msg_id, status="1"):
         conn = sqlite3.connect("data/fusionx_unified.db")
         cursor = conn.cursor()
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        # Schedule next follow-up 3 days from now
-        next_followup = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d")
+
+        # Get cooldown setting
+        li_cooldown, _ = get_cooldown_settings()
+
+        # Schedule next follow-up based on cooldown setting
+        next_followup = (datetime.now() + timedelta(days=li_cooldown)).strftime(
+            "%Y-%m-%d"
+        )
 
         cursor.execute(
             """
@@ -231,4 +266,116 @@ def update_linkedin_status(msg_id, status="1"):
         return True
     except Exception as e:
         print(f"Database Error: {e}")
+        return False
+
+
+def get_cooldown_settings():
+    """Get cooldown settings from database"""
+    try:
+        conn = sqlite3.connect("data/fusionx_unified.db")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)"
+        )
+
+        # Get LinkedIn cooldown (default 3 days)
+        li_cooldown = conn.execute(
+            "SELECT value FROM settings WHERE key='linkedin_cooldown_days'"
+        ).fetchone()
+        li_cooldown = int(li_cooldown[0]) if li_cooldown else 3
+
+        # Get Email cooldown (default 7 days)
+        email_cooldown = conn.execute(
+            "SELECT value FROM settings WHERE key='email_cooldown_days'"
+        ).fetchone()
+        email_cooldown = int(email_cooldown[0]) if email_cooldown else 7
+
+        conn.close()
+        return li_cooldown, email_cooldown
+    except:
+        return 3, 7
+
+
+def update_cooldown_settings(linkedin_days=None, email_days=None):
+    """Update cooldown settings"""
+    try:
+        conn = sqlite3.connect("data/fusionx_unified.db")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)"
+        )
+
+        if linkedin_days is not None:
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('linkedin_cooldown_days', ?)",
+                (str(linkedin_days),),
+            )
+
+        if email_days is not None:
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('email_cooldown_days', ?)",
+                (str(email_days),),
+            )
+
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error updating cooldown settings: {e}")
+        return False
+
+
+# Add these functions to your existing database.py (don't modify existing functions)
+
+
+def get_cooldown_settings():
+    """Get cooldown settings from database - creates default if not exists"""
+    try:
+        conn = sqlite3.connect("data/fusionx_unified.db")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)"
+        )
+
+        # Get LinkedIn cooldown (default 3 days)
+        li_cooldown = conn.execute(
+            "SELECT value FROM settings WHERE key='linkedin_cooldown_days'"
+        ).fetchone()
+        li_cooldown = int(li_cooldown[0]) if li_cooldown else 3
+
+        # Get Email cooldown (default 7 days)
+        email_cooldown = conn.execute(
+            "SELECT value FROM settings WHERE key='email_cooldown_days'"
+        ).fetchone()
+        email_cooldown = int(email_cooldown[0]) if email_cooldown else 7
+
+        conn.close()
+        return li_cooldown, email_cooldown
+    except Exception as e:
+        print(f"Error getting cooldown settings: {e}")
+        return 3, 7
+
+
+def update_cooldown_settings(linkedin_days=None, email_days=None):
+    """Update cooldown settings"""
+    try:
+        conn = sqlite3.connect("data/fusionx_unified.db")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)"
+        )
+
+        if linkedin_days is not None:
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('linkedin_cooldown_days', ?)",
+                (str(linkedin_days),),
+            )
+
+        if email_days is not None:
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('email_cooldown_days', ?)",
+                (str(email_days),),
+            )
+
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error updating cooldown settings: {e}")
         return False
