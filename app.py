@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+import uuid
 from database import (
     init_db,
     update_message_status,
@@ -13,11 +14,11 @@ from database import (
     is_duplicate,
     save_linkedin_only,
     update_linkedin_status,
+    get_cooldown_settings,
+    update_cooldown_settings,
 )
 from ai_engine import generate_vamshi_sequence, get_8_step_email_sequence
-from auth import init_auth, show_login_page, show_user_management
-from database import get_cooldown_settings, update_cooldown_settings
-
+from auth import init_auth, show_login_page
 
 # --- AUTH INIT ---
 init_auth()
@@ -25,12 +26,9 @@ init_auth()
 # --- AUTH GATE ---
 if not st.session_state.get("logged_in", False):
     show_login_page()
-    st.stop()  # ⛔ Stops rest of app
+    st.stop()
 
 # --- SESSION STATE INIT ---
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-
 if "current_user" not in st.session_state:
     st.session_state.current_user = None
 
@@ -39,15 +37,14 @@ if "selected_prospect" not in st.session_state:
 
 if "preview_email_id" not in st.session_state:
     st.session_state.preview_email_id = None
+
 st.set_page_config(
     page_title="FusionX Founder Control Center", page_icon="🎯", layout="wide"
 )
+
 from streamlit_autorefresh import st_autorefresh
 
-# Auto-refresh every 5 minutes (300000 ms) — adjust as needed
-st_autorefresh(
-    interval=3000, limit=1000, key="cooldown_refresh"
-)  # limit prevents infinite loops
+st_autorefresh(interval=300000, limit=1000, key="cooldown_refresh")
 
 init_db()
 
@@ -55,7 +52,7 @@ st.markdown(
     """
 <style>
     .stApp { background-color: #ffffff; color: #000000; }
-    [data-testid="stSidebar"] { background-color: #DEDEDE ; }
+    [data-testid="stSidebar"] { background-color: #DEDEDE; }
     .stButton>button { border-radius: 8px; font-weight: 600; width: 100%; transition: 0.3s; }
     div.stButton > button:first-child { background-color: #FFD000; color: black; border: 2px solid #FFD000; }
     .stMetric { background-color: #f8f9fa; padding: 15px; border-radius: 10px; border-left: 5px solid #FFD000; }
@@ -88,6 +85,7 @@ def send_email_smtp(to_email, subject, body, sender_email, app_password):
         server.login(sender_email, app_password)
         server.send_message(msg)
         server.quit()
+        time.sleep(1.0)
         return True
     except Exception as e:
         st.error(f"Mail Error: {str(e)}")
@@ -95,7 +93,6 @@ def send_email_smtp(to_email, subject, body, sender_email, app_password):
 
 
 def get_smtp_credentials():
-    """Load saved SMTP credentials from DB"""
     try:
         conn = sqlite3.connect("data/fusionx_unified.db")
         conn.execute(
@@ -115,70 +112,54 @@ def get_smtp_credentials():
 
 st.markdown(
     """
-    <style>
-    /* Style every button inside the sidebar */
-    [data-testid="stSidebar"] div.stButton > button {
-        background-color: #3d4b5f; /* Deep Slate Grey */
-        color: white; 
-        border-radius: 8px;
-        border: 1px solid #2d3748;
-        padding: 0.5rem;
-        transition: all 0.3s ease;
-    }
-
-    /* Style for when the mouse hovers over the button */
-    [data-testid="stSidebar"] div.stButton > button:hover {
-        background-color: #4a5568; /* Slightly lighter on hover */
-        border: 1px solid #FFD000; /* Electric blue border glow */
-        color: #FFD000;
-    }
-
-    /* Style for when the button is clicked/active */
-    [data-testid="stSidebar"] div.stButton > button:active {
-        background-color: #FFD000;
-        color: white;
-    }
-
-    /* Optional: Make the expander headers look cleaner */
-    [data-testid="stSidebar"] .st-expanderHeader {
-        background-color: transparent;
-        font-weight: bold;
-        color: #ccd0d6;
-    }
-    div[data-testid="stTabs"] [data-baseweb="tab-list"] {
-        position: fixed;
-        top: 2.875rem; /* Standard Streamlit header height */
-        background-color: white; /* Matches page background */
-        z-index: 999;
-        width: 100%; /* Ensure it spans the full content width */
-        padding: 10px 0;
-        border-bottom: 1px solid #e6e6e6;
-    }
-    </style>
-    """,
+<style>
+[data-testid="stSidebar"] div.stButton > button {
+    background-color: #3d4b5f;
+    color: white;
+    border-radius: 8px;
+    border: 1px solid #2d3748;
+    padding: 0.5rem;
+    transition: all 0.3s ease;
+}
+[data-testid="stSidebar"] div.stButton > button:hover {
+    background-color: #4a5568;
+    border: 1px solid #FFD000;
+    color: #FFD000;
+}
+[data-testid="stSidebar"] div.stButton > button:active {
+    background-color: #FFD000;
+    color: white;
+}
+div[data-testid="stTabs"] [data-baseweb="tab-list"] {
+    position: fixed;
+    top: 2.875rem;
+    background-color: white;
+    z-index: 999;
+    width: 100%;
+    padding: 10px 0;
+    border-bottom: 1px solid #e6e6e6;
+}
+</style>
+""",
     unsafe_allow_html=True,
 )
 
 # --- SIDEBAR ---
 if "mode" not in st.session_state:
     st.session_state.mode = "🌐LinkedIn System"
+
 with st.sidebar:
     left_co, cent_co, last_co = st.columns([1, 2, 1])
-
     with cent_co:
-        # Display the logo centered in the middle column
         st.image(
-            "https://dvk.ai/assets/img/dvk_logo_white_bg_transparent.png",
-            width=120,  # Increased width slightly for a centered look
+            "https://dvk.ai/assets/img/dvk_logo_white_bg_transparent.png", width=120
         )
 
-    # 2. Centered Title and User Info
     if st.session_state.get("current_user"):
         user = st.session_state.current_user
-        full_name = user["full_name"]
-        role = user["role"]
+        full_name = user.get("full_name", "User")
+        role = user.get("role", "Viewer")
     else:
-        # Fallback if no user session exists
         full_name = "Guest"
         role = "Viewer"
 
@@ -192,7 +173,7 @@ with st.sidebar:
                 <span>Role: <i>{role}</i></span>
             </div>
         </div>
-        """,
+    """,
         unsafe_allow_html=True,
     )
 
@@ -225,6 +206,67 @@ with st.sidebar:
 mode = st.session_state.mode
 
 
+# ================== SEQUENCE STEP TRACKER HELPER ==================
+def render_sequence_tracker(conn):
+    try:
+        df_counts = pd.read_sql_query(
+            """
+            SELECT
+                stage,
+                COUNT(*) as total,
+                SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) as sent
+            FROM messages
+            WHERE channel = 'email'
+            GROUP BY stage
+        """,
+            conn,
+        )
+
+        stages = ["Initial"] + [f"Follow-up {i}" for i in range(1, 9)]
+
+        for i, label in enumerate(stages, 1):
+            stage_data = df_counts[df_counts["stage"] == label]
+            if not stage_data.empty:
+                sent_count = int(stage_data["sent"].iloc[0])
+                total_count = int(stage_data["total"].iloc[0])
+            else:
+                sent_count = 0
+                total_count = 0
+
+            is_complete = total_count > 0 and sent_count == total_count
+            is_in_progress = sent_count > 0 and sent_count < total_count
+
+            if is_complete:
+                color, icon, text_col = "#28a745", "✓", "white"
+            elif is_in_progress:
+                color, icon, text_col = "#ffc107", "▶", "black"
+            else:
+                color, icon, text_col = "#f0f2f6", str(i), "#555"
+
+            status_desc = (
+                f"Sent {sent_count}/{total_count}" if total_count > 0 else "Pending"
+            )
+
+            st.markdown(
+                f"""
+                <div style="display: flex; align-items: center; margin-bottom: 12px;">
+                    <div style="background-color:{color}; width:30px; height:30px; border-radius:50%;
+                                display:flex; align-items:center; justify-content:center;
+                                margin-right:12px; color:{text_col}; font-weight:bold; font-size: 0.9em;">
+                        {icon}
+                    </div>
+                    <div>
+                        <div style="font-weight:600; font-size:0.95em;">{label}</div>
+                        <div style="font-size:0.8em; color:#666;">{status_desc}</div>
+                    </div>
+                </div>
+            """,
+                unsafe_allow_html=True,
+            )
+    except Exception as e:
+        st.error(f"Tracker Error: {e}")
+
+
 # ================== MODE 1: LINKEDIN SYSTEM ==================
 if mode == "🌐LinkedIn System":
     st.title("🔗 LinkedIn Control Center")
@@ -235,7 +277,6 @@ if mode == "🌐LinkedIn System":
     with tab1:
         conn = sqlite3.connect("data/fusionx_unified.db")
 
-        # 1. Metrics calculations
         total_li = conn.execute(
             "SELECT COUNT(*) FROM prospects WHERE linkedin != ''"
         ).fetchone()[0]
@@ -251,27 +292,22 @@ if mode == "🌐LinkedIn System":
             (today_str,),
         ).fetchone()[0]
 
-        # 2. Display metrics
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("LinkedIn Prospects", total_li)
         c2.metric("Messages Sent", sent_li)
         c3.metric("Pending Outreach", pending_li)
-        c4.metric("Follow ups due ", due_li)
+        c4.metric("Follow ups due", due_li)
 
-        # 3. Data Query
-        # Added 'sent_count' and renamed columns to match your dataframe call below
         df_linkedin = pd.read_sql_query(
             """
-            SELECT 
+            SELECT
                 p.name AS 'Employee',
                 p.company AS 'Company',
                 p.industry AS 'Title/Role',
                 m.stage AS 'Status',
-                -- Raw count for the lambda calculation
                 (SELECT COUNT(*) FROM messages WHERE prospect_id = p.id AND channel = 'linkedin' AND status IN ('1', 'sent')) AS 'Sent',
-                -- String progress
-                (SELECT COUNT(*) FROM messages WHERE prospect_id = p.id AND channel = 'linkedin' AND status IN ('1', 'sent')) 
-                || '/' || 
+                (SELECT COUNT(*) FROM messages WHERE prospect_id = p.id AND channel = 'linkedin' AND status IN ('1', 'sent'))
+                || '/' ||
                 (SELECT COUNT(*) FROM messages WHERE prospect_id = p.id AND channel = 'linkedin') AS 'Progress_String',
                 p.linkedin AS 'Profile Link',
                 m.next_followup AS 'Follow-up Date'
@@ -280,17 +316,16 @@ if mode == "🌐LinkedIn System":
             WHERE m.channel = 'linkedin'
             AND (
                 m.id = (
-                    SELECT MAX(id) FROM messages 
+                    SELECT MAX(id) FROM messages
                     WHERE prospect_id = p.id AND channel = 'linkedin' AND status IN ('1', 'sent')
                 )
-                OR 
-                (
+                OR (
                     m.id = (SELECT MIN(id) FROM messages WHERE prospect_id = p.id AND channel = 'linkedin' AND status = '0')
                     AND NOT EXISTS (SELECT 1 FROM messages WHERE prospect_id = p.id AND channel = 'linkedin' AND status IN ('1', 'sent'))
                 )
             )
             GROUP BY p.id
-            """,
+        """,
             conn,
         )
         st.divider()
@@ -300,12 +335,9 @@ if mode == "🌐LinkedIn System":
         with col1:
             st.subheader("📋 Outreach Summary")
             if not df_linkedin.empty:
-                # This line now works because "Sent" is in the SELECT statement
                 df_linkedin["PROGRESS"] = df_linkedin["Sent"].apply(
                     lambda x: f"{int(x)}/9"
                 )
-
-                # Ensure these names match the AS aliases in the SQL above
                 st.dataframe(
                     df_linkedin[["Company", "Employee", "PROGRESS", "Status"]],
                     use_container_width=True,
@@ -318,86 +350,12 @@ if mode == "🌐LinkedIn System":
 
         with col2:
             st.subheader("📊 Sequence Step Tracker")
+            render_sequence_tracker(conn)
 
-            try:
-                # 1. SQL handles 'sent' vs '0' based on your screenshot
-                df_counts = pd.read_sql_query(
-                    """
-                    SELECT 
-                        stage, 
-                        COUNT(*) as total,
-                        SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) as sent
-                    FROM messages 
-                    WHERE channel = 'email'
-                    GROUP BY stage
-                """,
-                    conn,
-                )
-
-                # 2. EXACT MATCH with your screenshot (Note the hyphens)
-                stages = [
-                    "Initial",
-                    "Follow-up 1",
-                    "Follow-up 2",
-                    "Follow-up 3",
-                    "Follow-up 4",
-                    "Follow-up 5",
-                    "Follow-up 6",
-                    "Follow-up 7",
-                    "Follow-up 8",
-                ]
-
-                for i, label in enumerate(stages, 1):
-                    # 3. Filtering logic
-                    stage_data = df_counts[df_counts["stage"] == label]
-
-                    if not stage_data.empty:
-                        sent_count = int(stage_data["sent"].iloc[0])
-                        total_count = int(stage_data["total"].iloc[0])
-                    else:
-                        sent_count = 0
-                        total_count = 0
-
-                    # Determine visual state
-                    is_complete = total_count > 0 and sent_count == total_count
-                    is_in_progress = sent_count > 0 and sent_count < total_count
-
-                    # Styling colors
-                    if is_complete:
-                        color, icon, text_col = "#28a745", "✓", "white"  # Done
-                    elif is_in_progress:
-                        color, icon, text_col = "#ffc107", "▶", "black"  # Some sent
-                    else:
-                        color, icon, text_col = "#f0f2f6", str(i), "#555"  # Waiting
-
-                    status_desc = (
-                        f"Sent {sent_count}/{total_count}"
-                        if total_count > 0
-                        else "Pending"
-                    )
-
-                    st.markdown(
-                        f"""
-                        <div style="display: flex; align-items: center; margin-bottom: 12px;">
-                            <div style="background-color:{color}; width:30px; height:30px; border-radius:50%; 
-                                        display:flex; align-items:center; justify-content:center; 
-                                        margin-right:12px; color:{text_col}; font-weight:bold; font-size: 0.9em;">
-                                {icon}
-                            </div>
-                            <div>
-                                <div style="font-weight:600; font-size:0.95em;">{label}</div>
-                                <div style="font-size:0.8em; color:#666;">{status_desc}</div>
-                            </div>
-                        </div>
-                    """,
-                        unsafe_allow_html=True,
-                    )
-            except Exception as e:
-                st.error(f"Tracker Error: {e}")
+        conn.close()
 
     with tab2:
         conn = sqlite3.connect("data/fusionx_unified.db")
-
         search_q = st.text_input("🔍 Search LinkedIn Prospects")
         query = "SELECT * FROM prospects WHERE linkedin IS NOT NULL AND linkedin != ''"
         if search_q:
@@ -435,12 +393,10 @@ if mode == "🌐LinkedIn System":
         conn = sqlite3.connect("data/fusionx_unified.db")
         conn.row_factory = sqlite3.Row
 
-        # Fetch the NEXT unsent message for each prospect who has at least one sent message
         query = """
-            SELECT 
+            SELECT
                 p.id as prospect_id, p.name, p.company,
                 m.id as msg_id, m.stage, m.content,
-                -- FIXED: Get next_followup from the LAST SENT message, not the unsent one
                 last_sent.next_followup as next_followup
             FROM messages m
             JOIN prospects p ON m.prospect_id = p.id
@@ -453,15 +409,15 @@ if mode == "🌐LinkedIn System":
             WHERE m.status = '0'
             AND m.channel = 'linkedin'
             AND m.id = (
-                SELECT MIN(id) FROM messages 
-                WHERE prospect_id = p.id 
-                AND channel = 'linkedin' 
+                SELECT MIN(id) FROM messages
+                WHERE prospect_id = p.id
+                AND channel = 'linkedin'
                 AND status = '0'
             )
             AND EXISTS (
-                SELECT 1 FROM messages 
-                WHERE prospect_id = p.id 
-                AND channel = 'linkedin' 
+                SELECT 1 FROM messages
+                WHERE prospect_id = p.id
+                AND channel = 'linkedin'
                 AND status = '1'
             )
             GROUP BY p.id
@@ -475,14 +431,12 @@ if mode == "🌐LinkedIn System":
             )
         else:
             today = pd.Timestamp.now()
-
             due_now = []
             waiting = []
 
             for _, row in df_followups.iterrows():
                 nf = row["next_followup"]
                 if not nf:
-                    # No timer set — due immediately
                     due_now.append(row)
                 else:
                     unlock_time = pd.to_datetime(nf)
@@ -548,7 +502,7 @@ if mode == "🌐LinkedIn System":
                 WHERE p.id = ? AND m.status = '0' AND m.channel = 'linkedin'
                 ORDER BY m.id ASC
                 LIMIT 1
-                """,
+            """,
                 (p_id,),
             ).fetchone()
             conn.close()
@@ -567,11 +521,9 @@ if mode == "🌐LinkedIn System":
                         "✅ Confirm Sent",
                         type="primary",
                         use_container_width=True,
-                        key=f"confirm_{lead_data['msg_id']}",
+                        key=f"confirm_tab3_{lead_data['msg_id']}",
                     ):
                         if update_linkedin_status(lead_data["msg_id"], status="1"):
-                            from database import get_cooldown_settings
-
                             li_cooldown, _ = get_cooldown_settings()
                             next_date = (
                                 datetime.now() + timedelta(days=li_cooldown)
@@ -589,7 +541,7 @@ if mode == "🌐LinkedIn System":
                             use_container_width=True,
                         )
                 with c3:
-                    if st.button("⬅️ Back", use_container_width=True):
+                    if st.button("⬅️ Back", use_container_width=True, key="back_tab3"):
                         st.session_state.selected_prospect = None
                         st.rerun()
 
@@ -599,11 +551,11 @@ if mode == "🌐LinkedIn System":
             conn = sqlite3.connect("data/fusionx_unified.db")
             untouched = pd.read_sql_query(
                 """
-                SELECT DISTINCT p.id, p.name, p.company 
+                SELECT DISTINCT p.id, p.name, p.company
                 FROM prospects p
                 JOIN messages m ON p.id = m.prospect_id
                 WHERE m.channel = 'linkedin' AND m.stage = 'Intro' AND m.status = '0'
-                """,
+            """,
                 conn,
             )
             conn.close()
@@ -639,7 +591,7 @@ if mode == "🌐LinkedIn System":
                 WHERE p.id = ? AND m.channel = 'linkedin' AND m.status = '0'
                 ORDER BY m.id ASC
                 LIMIT 1
-                """,
+            """,
                 (p_id,),
             ).fetchone()
             conn.close()
@@ -677,12 +629,14 @@ if mode == "🌐LinkedIn System":
                         use_container_width=True,
                     )
 
-                if st.button("⬅️ Back to List", use_container_width=True):
+                if st.button(
+                    "⬅️ Back to List", use_container_width=True, key="back_tab4"
+                ):
                     st.session_state.selected_prospect = None
                     st.rerun()
             else:
                 st.warning("No pending LinkedIn messages found for this prospect.")
-                if st.button("Back to List"):
+                if st.button("Back to List", key="back_tab4_empty"):
                     st.session_state.selected_prospect = None
                     st.rerun()
 
@@ -691,16 +645,14 @@ if mode == "🌐LinkedIn System":
 elif mode == "📧Email Automation":
     st.title("📧 Email Control Center")
 
-    # FIXED: Load SMTP creds from DB (no longer from sidebar)
     user_mail, app_pass = get_smtp_credentials()
 
     tab_dash, tab_gen, tab_track, tab_le = st.tabs(
         ["📊 Dashboard", "✉️ Send Emails", "📅 Follow Tracker", "🆕 New Leads"]
     )
 
-    conn = sqlite3.connect("data/fusionx_unified.db")
-
     with tab_dash:
+        conn = sqlite3.connect("data/fusionx_unified.db")
         try:
             today_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             total_p = conn.execute(
@@ -713,13 +665,7 @@ elif mode == "📧Email Automation":
                 "SELECT COUNT(*) FROM messages WHERE channel='email' AND status='0'"
             ).fetchone()[0]
             due_e = conn.execute(
-                """
-        SELECT COUNT(*)
-        FROM messages
-        WHERE channel='email'
-        AND status='0'
-        AND next_followup <= ?
-        """,
+                "SELECT COUNT(*) FROM messages WHERE channel='email' AND status='0' AND next_followup <= ?",
                 (today_str,),
             ).fetchone()[0]
 
@@ -727,7 +673,7 @@ elif mode == "📧Email Automation":
             k1.metric("Total Prospects", total_p)
             k2.metric("Emails Sent", sent_e)
             k3.metric("Drafts Pending", pending_e)
-            k4.metric("Follow ups due ", due_e)
+            k4.metric("Follow ups due", due_e)
 
             st.divider()
 
@@ -752,7 +698,6 @@ elif mode == "📧Email Automation":
             )
 
             col1, col2 = st.columns(2)
-
             with col1:
                 st.subheader("📋 Outreach Summary")
                 df_summary["PROGRESS"] = df_summary["Sent"].apply(
@@ -763,87 +708,13 @@ elif mode == "📧Email Automation":
                     use_container_width=True,
                     hide_index=True,
                 )
-
             with col2:
-                st.subheader("📊Sequence Step Tracker")
-
-                try:
-                    # 1. SQL handles 'sent' vs '0' based on your screenshot
-                    df_counts = pd.read_sql_query(
-                        """
-                        SELECT 
-                            stage, 
-                            COUNT(*) as total,
-                            SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) as sent
-                        FROM messages 
-                        WHERE channel = 'email'
-                        GROUP BY stage
-                    """,
-                        conn,
-                    )
-
-                    # 2. EXACT MATCH with your screenshot (Note the hyphens)
-                    stages = [
-                        "Initial",
-                        "Follow-up 1",
-                        "Follow-up 2",
-                        "Follow-up 3",
-                        "Follow-up 4",
-                        "Follow-up 5",
-                        "Follow-up 6",
-                        "Follow-up 7",
-                        "Follow-up 8",
-                    ]
-
-                    for i, label in enumerate(stages, 1):
-                        # 3. Filtering logic
-                        stage_data = df_counts[df_counts["stage"] == label]
-
-                        if not stage_data.empty:
-                            sent_count = int(stage_data["sent"].iloc[0])
-                            total_count = int(stage_data["total"].iloc[0])
-                        else:
-                            sent_count = 0
-                            total_count = 0
-
-                        # Determine visual state
-                        is_complete = total_count > 0 and sent_count == total_count
-                        is_in_progress = sent_count > 0 and sent_count < total_count
-
-                        # Styling colors
-                        if is_complete:
-                            color, icon, text_col = "#28a745", "✓", "white"  # Done
-                        elif is_in_progress:
-                            color, icon, text_col = "#ffc107", "▶", "black"  # Some sent
-                        else:
-                            color, icon, text_col = "#f0f2f6", str(i), "#555"  # Waiting
-
-                        status_desc = (
-                            f"Sent {sent_count}/{total_count}"
-                            if total_count > 0
-                            else "Pending"
-                        )
-
-                        st.markdown(
-                            f"""
-                            <div style="display: flex; align-items: center; margin-bottom: 12px;">
-                                <div style="background-color:{color}; width:30px; height:30px; border-radius:50%; 
-                                            display:flex; align-items:center; justify-content:center; 
-                                            margin-right:12px; color:{text_col}; font-weight:bold; font-size: 0.9em;">
-                                    {icon}
-                                </div>
-                                <div>
-                                    <div style="font-weight:600; font-size:0.95em;">{label}</div>
-                                    <div style="font-size:0.8em; color:#666;">{status_desc}</div>
-                                </div>
-                            </div>
-                        """,
-                            unsafe_allow_html=True,
-                        )
-                except Exception as e:
-                    st.error(f"Tracker Error: {e}")
+                st.subheader("📊 Sequence Step Tracker")
+                render_sequence_tracker(conn)
         except Exception as e:
             st.error(f"Dashboard Error: {e}")
+        finally:
+            conn.close()
 
     with tab_gen:
         st.subheader("✉️ Smart Review & Send")
@@ -851,7 +722,7 @@ elif mode == "📧Email Automation":
         if not user_mail or not app_pass:
             st.warning("⚠️ SMTP not configured. Go to **⚙️ Settings** in the sidebar.")
 
-        # Fetch NEXT due email per prospect
+        conn = sqlite3.connect("data/fusionx_unified.db")
         df_raw = pd.read_sql_query(
             """
             SELECT m.id, m.stage, m.subject, m.content, m.next_followup,
@@ -866,9 +737,10 @@ elif mode == "📧Email Automation":
                 AND m2.status = '0'
             )
             ORDER BY p.name ASC
-            """,
+        """,
             conn,
         )
+        conn.close()
 
         if df_raw.empty:
             st.info(
@@ -898,7 +770,6 @@ elif mode == "📧Email Automation":
                 )
 
             with c3:
-                # Shows only stages that are the CURRENT next step for at least one prospect
                 stage_order = ["Initial"] + [f"Follow-up {i}" for i in range(1, 10)]
                 present_stages = df_raw["stage"].unique().tolist()
                 available_stages = [s for s in stage_order if s in present_stages]
@@ -908,7 +779,6 @@ elif mode == "📧Email Automation":
                     key="gen_filter_stage",
                 )
 
-            # --- Apply all 3 filters ---
             df_filtered = df_raw.copy()
             if f_comp != "— All Companies —":
                 df_filtered = df_filtered[df_filtered["company"] == f_comp]
@@ -943,6 +813,7 @@ elif mode == "📧Email Automation":
 
                 # ── READY TO SEND ──────────────────────────────────────────
                 st.markdown("### 🚨 Ready to Send")
+
                 if due_df.empty:
                     st.success("✅ No emails due right now. All caught up!")
                 else:
@@ -950,95 +821,106 @@ elif mode == "📧Email Automation":
                         due_df["name"] + " (" + due_df["stage"] + ")"
                     )
                     col_sel, col_bulk = st.columns([2, 1])
+
                     with col_sel:
                         selected_label = st.selectbox(
                             "Select email to review:",
                             due_df["display_label"].tolist(),
+                            key="bulk_review_selector",
                         )
                         row = due_df[due_df["display_label"] == selected_label].iloc[0]
+
                     with col_bulk:
                         st.write("")
                         if st.button(
                             f"🚀 Send All {len(due_df)} Due Emails",
                             use_container_width=True,
                             type="primary",
+                            key="bulk_send_all",
                         ):
                             if not user_mail or not app_pass:
                                 st.error("Configure SMTP in ⚙️ Settings first!")
                             else:
                                 bar = st.progress(0)
+                                status_text = st.empty()
                                 sent_count = 0
-                                for i, (_, r) in enumerate(due_df.iterrows()):
-                                    if send_email_smtp(
-                                        r["email"],
-                                        r["subject"],
-                                        r["content"],
-                                        user_mail,
-                                        app_pass,
-                                    ):
-                                        update_message_status(r["id"], "sent")
-                                        sent_count += 1
-                                    bar.progress((i + 1) / len(due_df))
-                                st.success(
-                                    f"✅ Sent {sent_count} emails! "
-                                    f"Next follow-ups unlock in 7 days."
-                                )
-                                st.rerun()
+                                total_emails = len(due_df)
 
-                    # Email preview + individual send
+                                for i, (_, r) in enumerate(due_df.iterrows()):
+                                    status_text.info(
+                                        f"Sending {i+1}/{total_emails}: **{r['email']}**"
+                                    )
+                                    try:
+                                        if send_email_smtp(
+                                            r["email"],
+                                            r["subject"],
+                                            r["content"],
+                                            user_mail,
+                                            app_pass,
+                                        ):
+                                            update_message_status(r["id"], "sent")
+                                            sent_count += 1
+                                        time.sleep(1.5)
+                                    except Exception as e:
+                                        st.error(f"Error sending to {r['email']}: {e}")
+                                    bar.progress((i + 1) / total_emails)
+
+                                status_text.empty()
+                                if sent_count > 0:
+                                    st.success(
+                                        f"✅ Successfully sent {sent_count} emails!"
+                                    )
+                                    st.rerun()
+
+                    # ── SINGLE EMAIL PREVIEW ──────────────────────────────
                     with st.container(border=True):
                         st.write(
-                            f"**To:** {row['name']} ({row['email']}) "
-                            f"| **Stage:** {row['stage']}"
+                            f"**To:** {row['name']} ({row['email']}) | **Stage:** {row['stage']}"
                         )
 
-                        # Show overdue/due-today banner for follow-ups
                         if row["next_followup"] and row["stage"] != "Initial":
                             due_ts = pd.to_datetime(row["next_followup"])
                             days_overdue = (today - due_ts).days
                             if days_overdue > 0:
                                 st.warning(
-                                    f"⚠️ This follow-up was due {days_overdue} "
-                                    f"day(s) ago ({due_ts.strftime('%b %d')})"
+                                    f"⚠️ This follow-up was due {days_overdue} day(s) ago ({due_ts.strftime('%b %d')})"
                                 )
                             else:
                                 st.info(f"📅 Due today: {due_ts.strftime('%b %d, %Y')}")
 
                         final_sub = st.text_input(
-                            "Subject", row["subject"], key=f"s_gen_{row['id']}"
+                            "Subject", row["subject"], key=f"email_sub_{row['id']}"
                         )
                         final_body = st.text_area(
                             "Content",
                             row["content"],
                             height=250,
-                            key=f"c_gen_{row['id']}",
+                            key=f"email_body_{row['id']}",
                         )
 
                         if st.button(
                             "📤 Send This Email",
                             type="primary",
                             use_container_width=True,
+                            key=f"single_send_{row['id']}",
                         ):
                             if send_email_smtp(
-                                row["email"],
-                                final_sub,
-                                final_body,
-                                user_mail,
-                                app_pass,
+                                row["email"], final_sub, final_body, user_mail, app_pass
                             ):
                                 update_message_status(row["id"], "sent")
+                                _, email_cooldown = get_cooldown_settings()
                                 unlock_date = (
-                                    datetime.now() + timedelta(days=7)
+                                    datetime.now() + timedelta(days=email_cooldown)
                                 ).strftime("%b %d, %Y")
                                 st.success(
-                                    f"✅ Sent to {row['name']}! "
-                                    f"Next follow-up unlocks on **{unlock_date}**"
+                                    f"✅ Sent to {row['name']}! Next follow-up unlocks on **{unlock_date}**"
                                 )
+                                time.sleep(1)
                                 st.rerun()
 
                 st.divider()
 
-                # ── WAITING / COOLDOWN ─────────────────────────────────────
+                # ── WAITING / COOLDOWN ────────────────────────────────────
                 _, email_cooldown = get_cooldown_settings()
                 st.markdown(
                     f"### ⏳ Scheduled (Waiting Period — {email_cooldown} days)"
@@ -1062,8 +944,7 @@ elif mode == "📧Email Automation":
                             with col_b:
                                 if days_left > 0:
                                     st.info(
-                                        f"🔒 Unlocks in **{days_left}d {hours_left}h** "
-                                        f"({due_on.strftime('%b %d')})"
+                                        f"🔒 Unlocks in **{days_left}d {hours_left}h** ({due_on.strftime('%b %d')})"
                                     )
                                 else:
                                     st.info(
@@ -1091,33 +972,31 @@ elif mode == "📧Email Automation":
                             FROM messages m
                             JOIN prospects p ON p.id = m.prospect_id
                             WHERE m.id = ?
-                            """,
+                        """,
                             (preview_id,),
                         ).fetchone()
 
                     if pemail:
                         st.divider()
                         st.markdown(
-                            f"### ✏️ Review & Send — "
-                            f"{pemail['name']} ({pemail['stage']})"
+                            f"### ✏️ Review & Send — {pemail['name']} ({pemail['stage']})"
                         )
                         with st.container(border=True):
                             st.write(
-                                f"**To:** {pemail['name']} ({pemail['email']}) "
-                                f"@ {pemail['company']}"
+                                f"**To:** {pemail['name']} ({pemail['email']}) @ {pemail['company']}"
                             )
                             st.write(f"**Stage:** {pemail['stage']}")
 
                             edited_sub = st.text_input(
                                 "Subject",
                                 value=pemail["subject"],
-                                key=f"preview_sub_{preview_id}",
+                                key=f"gen_preview_sub_{preview_id}",
                             )
                             edited_body = st.text_area(
                                 "Content",
                                 value=pemail["content"],
                                 height=300,
-                                key=f"preview_body_{preview_id}",
+                                key=f"gen_preview_body_{preview_id}",
                             )
 
                             c1, c2 = st.columns(2)
@@ -1125,7 +1004,7 @@ elif mode == "📧Email Automation":
                                 if st.button(
                                     "⬅️ Cancel",
                                     use_container_width=True,
-                                    key="preview_cancel",
+                                    key="gen_preview_cancel",
                                 ):
                                     st.session_state.preview_email_id = None
                                     st.rerun()
@@ -1134,7 +1013,7 @@ elif mode == "📧Email Automation":
                                     "📤 Send Now",
                                     type="primary",
                                     use_container_width=True,
-                                    key="preview_send",
+                                    key="gen_preview_send",
                                 ):
                                     if send_email_smtp(
                                         pemail["email"],
@@ -1144,40 +1023,40 @@ elif mode == "📧Email Automation":
                                         app_pass,
                                     ):
                                         update_message_status(preview_id, "sent")
+                                        _, email_cooldown = get_cooldown_settings()
                                         unlock_date = (
                                             datetime.now()
                                             + timedelta(days=email_cooldown)
                                         ).strftime("%b %d, %Y")
                                         st.success(
-                                            f"✅ Sent to {pemail['name']}! "
-                                            f"Next follow-up unlocks on **{unlock_date}**"
+                                            f"✅ Sent to {pemail['name']}! Next follow-up unlocks on **{unlock_date}**"
                                         )
                                         st.session_state.preview_email_id = None
                                         st.rerun()
                     else:
                         st.session_state.preview_email_id = None
+
     with tab_track:
         st.subheader("📅 Sent Outreach History")
+        conn = sqlite3.connect("data/fusionx_unified.db")
 
-        # 1. Fetch and Display Sent Emails
         df_track = pd.read_sql_query(
             """
             SELECT p.name as 'Lead', p.company as 'Company', m.stage as 'Stage',
                 m.subject as 'Subject', m.sent_at as 'Sent On',
                 m.next_followup as 'Next Follow-up Due'
-            FROM messages m 
-            JOIN prospects p ON p.id = m.prospect_id 
+            FROM messages m
+            JOIN prospects p ON p.id = m.prospect_id
             WHERE m.channel='email' AND m.status='sent'
             ORDER BY m.sent_at DESC
-            """,
+        """,
             conn,
         )
         st.dataframe(df_track, use_container_width=True, hide_index=True)
 
         st.divider()
-
-        # 2. Fetch Scheduled/Waiting Emails
         st.markdown("### ⏳ Scheduled")
+
         df_waiting_track = pd.read_sql_query(
             """
             SELECT m.id, m.stage, m.subject, m.content, m.next_followup,
@@ -1193,9 +1072,10 @@ elif mode == "📧Email Automation":
                 AND m2.status = '0'
             )
             ORDER BY m.next_followup ASC
-            """,
+        """,
             conn,
         )
+        conn.close()
 
         if df_waiting_track.empty:
             st.info("No emails in cooldown.")
@@ -1211,7 +1091,6 @@ elif mode == "📧Email Automation":
             if waiting_only.empty:
                 st.info("No emails in cooldown.")
             else:
-                # --- LIST VIEW LOOP ---
                 for _, w in waiting_only.iterrows():
                     due_on = pd.to_datetime(w["next_followup"])
                     days_left = (due_on - today_track).days
@@ -1233,20 +1112,18 @@ elif mode == "📧Email Automation":
                             else:
                                 st.info(f"🔒 Unlocks in **{hours_left} hours** today")
                         with col_c:
-                            # Triggers the preview mode below
                             if st.button(
                                 "👁️ Preview & Send",
-                                key=f"btn_prev_{w['id']}",
+                                key=f"track_prev_{w['id']}",
                                 use_container_width=True,
                             ):
                                 st.session_state.preview_email_id = w["id"]
                                 st.rerun()
 
-        # --- 3. PREVIEW / EDIT MODE (Renders OUTSIDE the loop) ---
+        # --- PREVIEW / EDIT MODE ---
         if st.session_state.get("preview_email_id") is not None:
             preview_id = st.session_state.preview_email_id
 
-            # Use a context manager for the preview fetch to keep it clean
             with sqlite3.connect("data/fusionx_unified.db") as pconn:
                 pconn.row_factory = sqlite3.Row
                 pemail = pconn.execute(
@@ -1256,7 +1133,7 @@ elif mode == "📧Email Automation":
                     FROM messages m
                     JOIN prospects p ON p.id = m.prospect_id
                     WHERE m.id = ?
-                    """,
+                """,
                     (preview_id,),
                 ).fetchone()
 
@@ -1271,21 +1148,22 @@ elif mode == "📧Email Automation":
                         f"**To:** {pemail['name']} ({pemail['email']}) @ {pemail['company']}"
                     )
 
-                    # FIXED: Argument name updated to 'app_password' to match your function
                     edited_sub = st.text_input(
-                        "Subject", value=pemail["subject"], key=f"inp_sub_{preview_id}"
+                        "Subject",
+                        value=pemail["subject"],
+                        key=f"track_sub_{preview_id}",
                     )
                     edited_body = st.text_area(
                         "Content",
                         value=pemail["content"],
                         height=300,
-                        key=f"inp_body_{preview_id}",
+                        key=f"track_body_{preview_id}",
                     )
 
                     c1, c2 = st.columns(2)
                     with c1:
                         if st.button(
-                            "⬅️ Cancel", use_container_width=True, key="prev_cancel_btn"
+                            "⬅️ Cancel", use_container_width=True, key="track_cancel_btn"
                         ):
                             st.session_state.preview_email_id = None
                             st.rerun()
@@ -1294,7 +1172,7 @@ elif mode == "📧Email Automation":
                             "📤 Send Now",
                             type="primary",
                             use_container_width=True,
-                            key="prev_send_btn",
+                            key="track_send_btn",
                         ):
                             if send_email_smtp(
                                 pemail["email"],
@@ -1307,15 +1185,13 @@ elif mode == "📧Email Automation":
                                 st.success(f"✅ Sent to {pemail['name']}!")
                                 st.session_state.preview_email_id = None
                                 st.rerun()
-
-    conn.close()
+            else:
+                st.session_state.preview_email_id = None
 
     with tab_le:
-        # Initialize session state for lead selection
         if "selected_prospect" not in st.session_state:
             st.session_state.selected_prospect = None
 
-        # Fetch SMTP credentials for the send operations
         user_mail, app_pass = get_smtp_credentials()
 
         if st.session_state.selected_prospect is None:
@@ -1324,7 +1200,6 @@ elif mode == "📧Email Automation":
                 "Select a prospect to review or send all initial emails at once."
             )
 
-            # Use context manager for better connection handling
             with sqlite3.connect("data/fusionx_unified.db") as conn:
                 untouched = pd.read_sql_query(
                     """
@@ -1333,18 +1208,16 @@ elif mode == "📧Email Automation":
                     FROM prospects p
                     JOIN messages m ON p.id = m.prospect_id
                     WHERE m.channel = 'email' AND m.stage = 'Initial' AND m.status = '0'
-                    """,
+                """,
                     conn,
                 )
 
             if untouched.empty:
                 st.success("🎉 All initial Email messages have been sent!")
             else:
-                # --- BULK SEND ACTION ---
                 col_info, col_bulk = st.columns([2, 1])
                 with col_info:
                     st.info(f"Currently tracking **{len(untouched)}** untouched leads.")
-
                 with col_bulk:
                     if st.button(
                         f"🚀 Send All {len(untouched)} Emails",
@@ -1370,7 +1243,6 @@ elif mode == "📧Email Automation":
 
                 st.divider()
 
-                # --- INDIVIDUAL LIST ---
                 for _, row in untouched.iterrows():
                     with st.container(border=True):
                         col_text, col_btn = st.columns([4, 1])
@@ -1379,14 +1251,13 @@ elif mode == "📧Email Automation":
                             st.caption(f"🏢 {row['company']} | ✉️ {row['email']}")
                         with col_btn:
                             if st.button(
-                                "📝 Initial Massages",
+                                "📝 Initial Messages",
                                 key=f"start_email_{row['id']}",
                                 use_container_width=True,
                             ):
                                 st.session_state.selected_prospect = row["id"]
                                 st.rerun()
         else:
-            # --- INDIVIDUAL ACTION MODE ---
             p_id = st.session_state.selected_prospect
             with sqlite3.connect("data/fusionx_unified.db") as conn:
                 conn.row_factory = sqlite3.Row
@@ -1397,7 +1268,7 @@ elif mode == "📧Email Automation":
                     JOIN messages m ON p.id = m.prospect_id
                     WHERE p.id = ? AND m.channel = 'email' AND m.status = '0'
                     ORDER BY m.id ASC LIMIT 1
-                    """,
+                """,
                     (p_id,),
                 ).fetchone()
 
@@ -1406,15 +1277,24 @@ elif mode == "📧Email Automation":
                     f"🎯 **Target:** {lead['name']} | **Company:** {lead['company']}"
                 )
 
-                # Editable fields for the individual review
-                final_sub = st.text_input("Subject", lead["subject"])
-                final_body = st.text_area("Content", lead["content"], height=300)
+                final_sub = st.text_input(
+                    "Subject", lead["subject"], key=f"le_sub_{p_id}"
+                )
+                final_body = st.text_area(
+                    "Content", lead["content"], height=300, key=f"le_body_{p_id}"
+                )
 
                 c1, c2 = st.columns(2)
-
+                with c1:
+                    if st.button("⬅️ Back", use_container_width=True, key="le_back"):
+                        st.session_state.selected_prospect = None
+                        st.rerun()
                 with c2:
                     if st.button(
-                        "📤 Send Now", type="primary", use_container_width=True
+                        "📤 Send Now",
+                        type="primary",
+                        use_container_width=True,
+                        key="le_send",
                     ):
                         if send_email_smtp(
                             lead["email"], final_sub, final_body, user_mail, app_pass
@@ -1427,7 +1307,6 @@ elif mode == "📧Email Automation":
                 st.session_state.selected_prospect = None
                 st.rerun()
 
-        # --- RECENT ACTIVITY TRACKING ---
         st.divider()
         st.subheader("📊 Recent Activity")
         with sqlite3.connect("data/fusionx_unified.db") as conn:
@@ -1438,14 +1317,16 @@ elif mode == "📧Email Automation":
                 JOIN prospects p ON p.id = m.prospect_id
                 WHERE m.status = 'sent' AND m.channel = 'email'
                 ORDER BY m.sent_at DESC LIMIT 10
-                """,
+            """,
                 conn,
             )
         st.dataframe(df_track, use_container_width=True, hide_index=True)
 
+
 # ================== MODE 3: MASTER DATABASE ==================
 elif mode == "📂Master Database":
     tab_up_list = st.tabs(["📊 Upload", "🗄️Master Table"])
+
     with tab_up_list[0]:
         col_up1, col_up2 = st.columns(2)
 
@@ -1493,14 +1374,11 @@ elif mode == "📂Master Database":
                 e = st.text_input("Email")
                 i = st.text_input("Industry/Position")
                 l = st.text_input("LinkedIn URL")
-
                 submitted = st.form_submit_button(
                     "Add & Generate", use_container_width=True
                 )
 
-            # FIXED: Move logic OUTSIDE the form block so st.success() renders properly
             if submitted:
-                # FIXED: Strip asterisks and extra whitespace from name/company
                 n_clean = n.strip().replace("*", "").strip()
                 c_clean = c.strip().replace("*", "").strip()
 
@@ -1525,9 +1403,6 @@ elif mode == "📂Master Database":
                 else:
                     st.warning("Name and Email are required.")
 
-    conn = sqlite3.connect("data/fusionx_unified.db")
-    conn.close()
-
     with tab_up_list[1]:
         st.title("🗄️ Master Prospect Database")
         conn = sqlite3.connect("data/fusionx_unified.db")
@@ -1539,16 +1414,11 @@ elif mode == "📂Master Database":
         conn.close()
 
 
-# ================== MODE 4: SETTINGS (NOW VISIBLE) ==================
 # ================== MODE 4: SETTINGS ==================
 elif mode == "⚙️ Settings":
     st.title("⚙️ System Settings")
 
-    # Create tabs for different settings
     settings_tab1, settings_tab2 = st.tabs(["📧 Email/SMTP", "⏰ Cooldown Settings"])
-
-    # Import cooldown functions
-    from database import get_cooldown_settings, update_cooldown_settings
 
     with settings_tab1:
         st.markdown("### SMTP Configuration")
@@ -1616,7 +1486,7 @@ elif mode == "⚙️ Settings":
                     success = send_email_smtp(
                         test_to,
                         "FusionX SMTP Test",
-                        "Your SMTP configuration is working perfectly!",
+                        "Your SMTP configuration is working!",
                         saved_user,
                         saved_pass,
                     )
@@ -1633,11 +1503,9 @@ elif mode == "⚙️ Settings":
             "Configure how many days to wait before sending the next follow-up message."
         )
 
-        # Get current settings
         current_li_cooldown, current_email_cooldown = get_cooldown_settings()
 
         col1, col2 = st.columns(2)
-
         with col1:
             st.markdown("#### 🔗 LinkedIn Cooldown")
             li_days = st.number_input(
@@ -1646,7 +1514,6 @@ elif mode == "⚙️ Settings":
                 max_value=30,
                 value=current_li_cooldown,
                 step=1,
-                help="Number of days to wait after a LinkedIn message before sending the next follow-up",
             )
             st.caption(f"Current: {current_li_cooldown} day(s)")
 
@@ -1658,7 +1525,6 @@ elif mode == "⚙️ Settings":
                 max_value=30,
                 value=current_email_cooldown,
                 step=1,
-                help="Number of days to wait after an email before sending the next follow-up",
             )
             st.caption(f"Current: {current_email_cooldown} day(s)")
 
